@@ -1,5 +1,5 @@
-Hidden (Semi-)Markov Models for FX Regime Detection
-Quantitative Finance Project — CF II: LBK Algorithmic Trading Series
+**Hidden (Semi-)Markov Models for FX Regime Detection
+Quantitative Finance Project — CF II: LBK Algorithmic Trading Series**
 
 Objective
 ---------
