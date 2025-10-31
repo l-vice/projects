@@ -1,0 +1,671 @@
+---
+title: "COMPUTATIONAL FINANCE I - GARMENT WORKERS"
+author: "LBK"
+date: "2025-09-12"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_section: true
+    code_folding: hide
+    fig_caption: true
+---
+
+```{r setup, include=FALSE}
+
+ knitr::opts_chunk$set(
+  echo = FALSE, message = FALSE, warning = FALSE, include = FALSE,# output
+  fig.width = 10, fig.height = 6, dpi = 150, fig.align = "center" # figures
+)
+
+```
+
+```{r}
+
+LoadLibraries <- function() {
+  require(tidyverse) # general
+  require(patchwork) # Combining plots of interactive effects
+  require(scales) # Graph styling
+  require(kableExtra) # tables in Rmakrdown
+  require(corrplot) # Plot for correlations of numerical variables
+  require(caret) # near-zero variance
+  require(car) # vif, residualPlots
+  require(class) # knn
+  require(MASS) # lda, qda
+  require(klaR) # regularized qda
+  require(boot) # bootstrap methods
+  require(glmnet) # ridge, lasso
+  require(leaps) # regsubsets
+  require(L0Learn) # subset selection for logit link
+  print("Packages loaded")
+}
+
+suppressPackageStartupMessages(LoadLibraries()) 
+
+```
+
+```{r}
+
+files <- c("Objects/boot.lda_auc.rds", "Objects/boot.logit_auc.rds", "Objects/cv_mc_results.rds",
+           "Objects/cv_plots_patchwork.rds", "Objects/interaction_and_probability_plots.rds", "Objects/knn.dataframes.rds",
+           "Objects/logit.boot_results.rds", "Objects/logit.boot_results.rds", "Objects/logit.boot_results.rds",
+           "Objects/model_formulas.rds", "Objects/patchwork_plots.rds", "Objects/top_models.rds",
+           "Objects/probability_plot.rds", "Objects/bootstrap_ci_plots.rds", "Objects/auc_ci_combined.rds",
+           "Objects/patchwork_roc_graphs.rds", "Objects/roc_ci_combined.rds"
+)
+
+# Load each RDS and assign into global environment
+lapply(files, function(f) {
+   obj <- readr::read_rds(f)
+   objname <- tools::file_path_sans_ext(basename(f))
+   assign(objname, obj, envir = .GlobalEnv)
+})
+
+```
+
+# Introduction
+
+This study examines garment factory productivity using daily team-level data. The central question is whether teams achieve the productivity targets set by management and how incentives, overtime, staffing, and workflow interact with this outcome. We clean and prepare the dataset, summarize key structural patterns, and then move to formal modeling. The goal is not only predictive accuracy, but also interpretability—so that findings can inform real-world management decisions.
+
+# Analysis
+
+## Data: Cleaning & Preparation
+
+We began by preparing a model-ready dataset that preserves operational meaning while correcting clear inconsistencies.
+
+### Target variable
+
+**Definition of \(Y\).**  
+We define achievement of the daily target as  
+
+\[
+Y =
+\begin{cases}
+1, & \text{if } \text{Actual Productivity} \geq \text{Target Productivity}, \\
+0, & \text{otherwise}.
+\end{cases}
+\]
+
+Both actual and target productivity are rounded to two decimals before comparison. This avoids spurious cases caused by tiny rounding differences and mirrors how managers evaluate performance in practice.
+
+### Dates and factors
+- *Calendar date (date).* Raw dates included stray spaces and US-style formatting. We applied `trimws()` and parsed them using `as.POSIXct` to ensure consistent ordering and reproducibility.  
+- *Period of the month (quarter).* The original “Quarter1–Quarter5” was actually a week-in-month indicator. We recoded it to week_1–week_5 with week_1 as the baseline for modeling.  
+- *Departments (department).* The typo `"sweing"` was corrected to `"sewing"`. We retain this as a labeled factor for tables and plots, and also use a binary coding (sewing = 0, finishing = 1) when simpler interpretation is needed.  
+- *Teams and days.* Stored as factors so that team and day effects are treated as categorical rather than numeric.
+
+### Numerical variables
+- *Management target (targeted_productivity).* The single value of 0.07 was implausible and likely a typo. We corrected it to 0.70.  
+- *Headcount (no_of_workers).* Values such as 30.5 indicated partial shifts. For clarity we rounded to the nearest integer. Predictions using rounded versus raw values were nearly identical, but interpretation is clearer when counts are whole numbers.  
+- *Style shocks (no_of_style_change).* Distinguishing between one or two changes added noise without improving fit. We collapsed the variable to a simple indicator: 1 if any style change occurred, 0 otherwise.  
+- *Work-in-progress (wip).* Missing values occurred only in finishing, where no WIP is tracked. We imputed zeros and created a scoped variable, *wip_sewing*, so that only sewing lines carry this measure.  
+- *Idle workers (idle_men).* Nearly 98% of values were zero. A binary encoding did not improve models, so the original variable was kept, with the understanding that it contributes little signal.  
+- *Incentives (incentive).* Values are kept in Bangladeshi Taka (BDT) to preserve local meaning. Conversion to EUR or USD would not improve the analysis. Transformations (e.g., log) are considered later in modeling.  
+- *Overtime (over_time).* Recorded in minutes; retained as-is for modeling, though sometimes expressed in hours for interpretability in figures.  
+- *SMV (smv).* The standard minute value is left in minutes. Squared terms may be introduced later to capture nonlinearities.
+
+### Section summary
+After these adjustments, the dataset includes:
+
+- Clean identifiers (*date*, *team*, *day*, ordered *week_in_month*) and corrected labels (*department*);
+- A clear target variable \(Y\) consistent with managerial evaluation;
+- Engineered features (*no_of_workers*, binary *no_of_style_change*, scoped *wip_sewing*);
+- Variables in operational units (minutes, BDT, headcount) for transparent communication.
+
+**Assumptions and risks.**  
+The correction of 0.07 to 0.70 assumes a data entry error. Rounding worker counts sacrifices some detail on partial shifts but improves clarity. *wip_sewing* enforces a zero effect for finishing lines. All of these choices were checked against model fit and can be revisited in sensitivity analyses.  
+
+---
+
+## Structural Patterns {#structural-patterns}
+
+### Department and Team-Level Patterns
+**Departments.** The two departments differ structurally in both task complexity and responsiveness to management incentives (Fig. [A1](#a1)). Sewing operates with higher task times (average SMV ≈ 23 minutes) and larger crews, while Finishing handles shorter tasks (average SMV ≈ 4 minutes) with smaller groups. Incentives play a central role in Sewing: once even modest bonuses are introduced, most sewing teams consistently achieve their productivity targets. Finishing, by contrast, records little incentive use, and performance remains below benchmark levels regardless of bonuses. This divergence reflects not only differences in task complexity but also the downstream position of Finishing, which depends on upstream sewing output.
+
+**Teams.** Within departments, variation across teams is pronounced (Figs. [A2](#a2)–[A3](#a3)).  
+- **High performers:** Teams 1, 3, 4, and 12 consistently achieve targets. Teams 1 and 12 stand out for maintaining strong performance without overtime, indicating efficient baseline organization.  
+- **Mid-level performers:** Teams 2, 5, 9, 10, and 11 cluster in the middle. Their productivity often fluctuates with incentives and overtime, with moderate overtime sometimes reducing output before improvements appear at extreme levels.  
+- **Underperformers:** Teams 6, 7, and 8 lag behind across all dimensions. Team 6, for example, operates with a smaller headcount (≈35 workers versus the norm of 55–58), while Teams 7 and 8 show little productivity response even with overtime or incentives applied.  
+
+Operational indicators reinforce these patterns. Work-in-progress varies widely across sewing teams, from about 800 to 1,600 units (Fig. [A4](#a4)), with Teams 1 and 10 carrying particularly heavy loads. Headcounts are uneven as well, amplifying performance gaps between teams.  
+
+**Summary.** Departmental differences highlight structural constraints (sewing is responsive to incentives, finishing less so), while team-level analysis reveals that sustained performance depends less on overtime and more on staffing balance and workflow organization.
+
+---
+
+## Variable Selection and Model Specification
+This section aims to explain the process taken to identify a set of predictors for the binary outcome \(Y\) (achievement of daily productivity target). We combined shrinkage methods (lasso, elastic net), subset selection (via `L0Learn`), and manual specification to balance statistical fit with managerial interpretability.
+
+### Shrinkage and subset methods
+We began by applying lasso and elastic net regularization on the full design matrix. Both methods penalize coefficients toward zero, helping control multicollinearity while selecting the most relevant predictors. We obtain two sets of results depending on the choice of shrinkage parameter λ:
+
+- **At the best λ (minimizing cross–validated error):** department and team 8 were consistent, while additional signals appeared for style changes, incentives, and certain temporal effects.  
+- **At the 1-SE λ (one standard error above the minimum error):** all shrinkage methods converged on a much simpler solution, retaining only department and team 8. This rule sacrifices a small amount of fit in exchange for stability and interpretability.
+
+To complement the shrinkage methods, we used the `L0Learn` package to perform best subset selection under logistic loss. Unlike lasso or elastic net, which rely on \(\ell_1\) or mixed penalties, `L0Learn` directly approximates the classic best subset problem by applying an \(\ell_0\) penalty, effectively limiting the number of active predictors. We ran the function `L0Learn.fit()`, which evaluates predictive performance across held-out folds while progressively varying the subset size.  
+
+The cross-validation curves showed that models with only a few active variables already achieved near-optimal predictive accuracy. Across the solution path, **department** and **team 8** consistently entered early and remained stable, marking them as the most robust predictors. Additional variables (style changes, incentives, temporal dummies) appeared in larger subsets but with less stability. This ranking closely mirrored the results from lasso and elastic net, strengthening our confidence in the final variable selection.
+
+These results suggest a clear baseline: department and team 8 form the core explanatory set across all methods when prioritizing robustness (1-SE). The additional predictors identified under the best λ are informative but less stable, and will be revisited in exploratory specifications to test whether they materially improve performance beyond the core model.
+
+### Exploratory specifications
+Starting from the recommendations agreed by the shrinkage methods, we created a series of logistic regression models to test how different predictor blocks behaved:
+
+- **Time effects** (week and day dummies): improved fit marginally but created multicollinearity when combined with department.  
+- **Operational factors** (SMV, WIP, incentives, workers, style changes): several had weak or unstable coefficients once department was included. We kept style changes and incentives since they were a better fit for our overall modeling goal.  
+- **Interactions**: targeted exploration showed meaningful effects for interactions such as `department × workers` and `team × incentives`. These highlighted that certain teams reacted differently to style shocks or incentive pay.  
+- **Transformations**: link-function checks revealed violations for incentive and SMV. We corrected this with log-transforms (log1p) and polynomial terms (quadratic for SMV, square-root for overtime). These adjustments reduced curvature in logit plots and stabilized VIFs.
+
+### Final model portfolio
+Based on these steps, we defined a portfolio of final models, each serving a different purpose:
+
+- **Best statistical fit**: includes polynomial/log transforms, incentive and SMV curvature, and selected team interactions. This model achieves the lowest AIC/BIC but is difficult to interpret directly.  
+- **Optimized best fit**: a simplified version of the above with three weak predictors dropped, offering nearly identical performance with reduced complexity.  
+- **Interpretable model**: department, team indicators, style changes, incentives, and selected interactions only. This model is straightforward to interpret (e.g., team-level incentive effects) and useful for managerial recommendations.  
+- **Interpretable (log-adjusted)**: same as above but with log-transforms to control multicollinearity and outliers.  
+- **Parsimonious model**: department + team 8. This was the minimal form consistently recommended by lasso, elastic net, and subset selection.
+
+Together these models represent the trade-off between predictive accuracy and interpretability. The interpretable specification will be used for managerial insights, while the best-fit versions are retained for statistical benchmarking. Comparative AIC/BIC values and likelihood ratio tests confirmed that while complex models offer marginally better fit, simpler models retain most explanatory power with clearer interpretation.
+
+---
+
+## Modeling
+This section evaluates the predictive performance of several classification methods for the daily productivity target variable \(Y\). To ensure comparability, all models were tested under the same repeated cross-validation scheme, with results summarized both numerically and graphically.
+
+### Cross-validation procedure
+For each candidate model we implemented stratified \(k\)-fold cross-validation, repeated multiple times to reduce variance. The evaluation metric was the mean classification error rate, with model stability assessed across folds and repetitions. To accommodate different model families, two functions were developed: one for generalized linear and discriminant models (logit, LDA, RDA) and another tailored for k-nearest neighbors (kNN).
+
+### Candidate models
+- **Logistic regression (LOGIT).**  
+  Benchmarked as the most interpretable parametric classifier, fitted with both baseline and optimized formulas.
+- **Linear Discriminant Analysis (LDA).**  
+  Applied after transforming the binary target to a factor. Serves as a direct competitor to logistic regression under normality assumptions.
+- **Regularized Discriminant Analysis (RDA).**  
+  Extends LDA by shrinking covariance estimates; tested with tuned \(\lambda\) and \(\gamma\).
+- **k-Nearest Neighbors (kNN).**  
+  Implemented with \(k=3\). Several alternative predictor sets were engineered to reflect different levels of transformation (raw, interpretable, log-adjusted, parsimonious).
+
+### Results {#results}
+Figure outputs (see [Appendix B](#appendix-b), Fig. [B1](#b1)) display the fold-wise cross-validation errors for each model family. Across repetitions, logistic regression and LDA performed best, with nearly identical mean error rates around **19.5%** (accuracy ≈ 80%). RDA trailed slightly at **19.8% error**, while kNN was clearly weaker at **26.2% error** (accuracy ≈ 74%).  
+
+```{r, include=TRUE}
+
+table1 <- data.frame(
+  Model = c("LOGIT", "LDA", "RDA", "kNN"),
+  Accuracy = c(0.805, 0.805, 0.801, 0.737),
+  Error = c(0.194, 0.194, 0.198, 0.262),
+  Formula = c("best_optimized", "best_optimized", "parsimonious", "best")
+)
+
+kable(table1, format = "html", align = "c") %>%
+  kable_styling(full_width = FALSE, position = "center")
+
+```
+*Table 1. Mean Cross-validation error over 1000 Monte-Carlo repetitions for LOGIT, LDA, RDA, and kNN models.*
+
+### Interpretation
+The comparison shows that parametric methods (LOGIT and LDA) are most effective for this dataset, achieving both strong predictive performance and interpretability. RDA offered no additional benefit over LDA, while kNN underperformed even with extensive preprocessing. Based on these results, subsequent analysis emphasizes the logistic regression framework, as it balances statistical efficiency with explanatory value for managerial recommendations.
+
+---
+
+## Probability Interpretation {#probability-interpretation}
+
+In this section we interpret the regression results into predicted probabilities under controlled scenarios. Using the interpretable model specification, we generated baseline scenarios and then varied one factor at a time to visualize its marginal effect. Full figures are provided in [Appendix C](#appendix-c) (Fig. [C1](#c1)).
+
+### Baseline and categorical effects
+At the baseline configuration, the probability of achieving the daily target was estimated at ~0.92. Deviations from this baseline reveal important contrasts. Certain teams (notably Teams 6, 8, 10, and 11) are consistently below the benchmark, while others (Teams 1, 3, 4, 12) remain at or above it. Calendar effects are weaker: Sundays and Thursdays carry a slightly lower probability, suggesting modest fatigue, but the difference is small relative to team-level heterogeneity. Departments diverge, with Sewing consistently outperforming Finishing.
+
+### Numeric effects
+Continuous variables highlight operational thresholds. Incentives show a steep increase in the probability of success at low levels, with diminishing returns beyond ~50 units; after this point, additional incentives add little. Work-in-progress (WIP) displays a similar pattern: once ~2,000 units are in progress, additional WIP does not meaningfully change the likelihood of meeting targets.
+
+### Interaction effects
+Interactions reveal where risks are concentrated. Larger teams in the Finishing department gain disproportionately from additional workers, reflecting tighter staffing constraints. By contrast, several weaker teams respond poorly to incentives, with probabilities declining as bonuses rise (Team 2 and Team 10 are notable examples). Style changes amplify these effects: Team 8 responds well to style changes, while Team 10’s probability of success drops. Such asymmetric responses suggest that team-level dynamics drive much of the observed variation.
+
+**Conclusion.**  
+The probability analysis confirms that Sewing outperforms Finishing, small incentives are highly effective, and bottlenecks are largely structural. Interactions underscore that underperforming teams require tailored interventions because overtime or incentive policies are insufficient. The detailed probability plots can be found in [Appendix C](#appendix-c) (Fig. [C1](#c1)).
+
+---
+
+## Bootstrap Validation
+
+Cross–validation provides an unbiased estimate of model error under repeated partitioning of data, but it does not quantify the sampling variability of those estimates. To address this, we applied non-parametric bootstrap resampling to our key models. The idea is straightforward: instead of relying on a single training–test split or even repeated folds, we resample the dataset with replacement many times, re-fit the model, and record the error each time. This gives an empirical distribution of the error rate, from which confidence intervals can be constructed.
+
+Formally, let \(\hat{\theta}\) denote the cross-validated error rate for a given model. Bootstrapping generates resampled datasets \(\{D^*_1,\dots,D^*_R\}\) of the same size as the original data. Each resample yields \(\hat{\theta}^*_r\), and the empirical distribution of \(\hat{\theta}^*_r\) approximates the sampling distribution of \(\hat{\theta}\). We then compute percentile confidence intervals to reflect the expected range of error rates if the study were replicated on new data from the same process.
+
+### Results {#results-bootstrap}
+
+The bootstrap distributions confirmed that error rates are stable across repeated samples. For the LOGIT models, the *best_optimized* specification produced an average error of ~0.190 with a narrow 95% percentile interval, closely aligned with its cross-validation estimate of 0.192. Similarly, *best_optimized* model under LDA specification yielded an error of ~0.190 with overlapping bootstrap and CV values. Parsimonious models showed wider intervals, reflecting higher variance when too few predictors are retained.
+
+A compact comparison is shown in [Appendix D](#appendix-d) (Fig. [D1](#d1)). The black dot marks the bootstrap mean, the thin line shows the 95% bootstrap percentile interval, and the open blue circle indicates the cross-validation mean. The fact that the blue markers lie well within the bootstrap intervals reassures us that cross-validation error estimates are not optimistic and that the models generalize consistently.
+
+To complement the graph, Table 1 reports cross-validation error, bootstrap mean error, and 95% percentile intervals for each model. These results confirm that the bootstrap distribution centers closely around the cross-validation estimate, with only small variability across resamples.
+
+```{r, include=TRUE}
+
+table2 <- data.frame(
+  Model = c("LOGIT – Best", "LOGIT – Best Opt.", "LOGIT – Interp.",
+            "LOGIT – Interp. Log", "LOGIT – Parsim.",
+            "LDA – Best", "LDA – Best Opt.", "LDA – Interp.",
+            "LDA – Interp. Log", "LDA – Parsim."),
+  CV_Error = c(0.193, 0.194, 0.227, 0.210, 0.241, 0.193, 0.194, 0.227, 0.210, 0.241),
+  Bootstrap_Mean = c(0.189, 0.190, 0.212, 0.201, 0.241, 0.189, 0.190, 0.222, 0.205, 0.241),
+  CI_Lower = c(0.166, 0.167, 0.186, 0.179, 0.229, 0.168, 0.167, 0.201, 0.182, 0.229),
+  CI_Upper = c(0.212, 0.213, 0.236, 0.225, 0.256, 0.212, 0.215, 0.241, 0.229, 0.254)
+)
+
+kable(table2, format = "html", align = "c") %>%
+  kable_styling(full_width = FALSE, position = "center")
+
+```
+*Table 2. Cross-validation error and bootstrap confidence intervals for LOGIT and LDA models (1000 bootstrap replications).*
+
+### Interpretation
+
+Bootstrapping strengthens our results in three ways:
+
+1. It quantifies uncertainty around the error rates, rather than reporting single-point estimates.  
+2. It demonstrates that the ranking of models (*best_optimized* outperforming *parsimonious*) is robust to resampling variability.  
+3. It highlights the trade-off between interpretability and predictive accuracy: while more complex models achieve slightly lower error, simpler specifications remain competitive within their confidence bounds.
+
+It is important to note, however, that we applied the ordinary bootstrap. This method resamples the same observations repeatedly, which means that some data points may appear multiple times in a given resample while others are omitted. This reduces the effective variability of the samples and can understate the true uncertainty of model error. For this reason, bootstrap results should not be taken as final evidence on their own. Our primary validation remains the cross-validation procedure repeated 1000 times, which provides a more reliable baseline. The fact that bootstrap means and CV results closely match in this study supports the robustness of our findings, but we explicitly acknowledge the drawback of the ordinary bootstrap approach.
+
+---
+
+## AUC/ROC Analysis
+
+**Receiver Operating Characteristic (ROC)** analysis provides a complementary perspective to error rates by focusing on the trade-off between sensitivity (true positive rate) and specificity (false positive rate). The **Area Under the Curve (AUC)** serves as a scalar summary: values closer to 1 indicate strong discriminatory power, while values near 0.5 suggest random guessing.
+
+### Results{#auc_roc-results}
+
+Cross–validated ROC curves (Fig. [E1](#e1)) show that both **Logistic Regression** (LOGIT) and **Linear Discriminant Analysis** (LDA) models achieve consistently high AUC values across specifications. For LOGIT, the *best* and *best_optimized* models achieved mean AUCs of 0.856 and 0.858, respectively, while the interpretable variants were slightly lower (0.808 for *interpretable* and 0.832 for *interpretable_log*). The *parsimonious* model lagged behind, with an AUC of 0.682. LDA results closely mirrored this pattern, with *best* and *best_optimized* models yielding AUCs of 0.856 and 0.858, respectively, *interpretable* and *interpretable_log* models scored 0.776 and 0.828, and the parsimonious model saw no improvement, remaining at 0.682.
+
+Bootstrap confidence intervals for AUC (Fig. [E2](#e2)) further confirmed these findings. For LOGIT, the *best_optimized* model had a mean bootstrap AUC of 0.840 with a 95% interval of [0.785, 0.888], overlapping almost perfectly with the cross–validation mean. The *parsimonious* specification was substantially weaker, with a mean AUC of 0.699 [0.629, 0.764].  
+Similarly, for LDA, the *best_optimized* model recorded a mean bootstrap AUC of 0.828 [0.771, 0.882], while the *parsimonious* model again fell to 0.700 [0.634, 0.763].
+
+Beyond overall AUC values, bootstrap confidence bands for the ROC curves (Fig. [E3](#e3)) highlight how performance varies across the false positive rate spectrum. The *best* and *best_optimized* models maintain high sensitivity across most thresholds, while the *parsimonious* models display wider uncertainty bands and weaker separation from the diagonal, confirming lower classification scores.
+
+A compact summary of AUC estimates is shown in Table 3.
+```{r, include=TRUE}
+
+table3 <- data.frame(
+  Model = c("LOGIT – Best", "LOGIT – Optimized", "LOGIT – Interp.",
+            "LOGIT – Interp._log", "LOGIT – Parsim.",
+            "LDA – Best", "LDA – Optimized", "LDA – Interp.",
+            "LDA – Interp._log", "LDA – Parsim."),
+  CV_AUC = c(0.856, 0.858, 0.808, 0.832, 0.682,
+               0.856, 0.858, 0.776, 0.828, 0.682),
+  Bootstrap_Mean = c(0.838, 0.840, 0.805, 0.828, 0.699,
+                       0.826, 0.828, 0.785, 0.822, 0.700),
+  CI_Lower = c(0.778, 0.785, 0.744, 0.770, 0.629,
+                       0.765, 0.771, 0.713, 0.761, 0.634),
+  CI_Upper = c(0.886, 0.888, 0.863, 0.879, 0.764,
+                       0.880, 0.882, 0.848, 0.875, 0.763)
+)
+
+kable(table3, format = "html", align = "c") %>%
+  kable_styling(full_width = FALSE, position = "center")
+
+```
+*Table 3. Cross–validated AUC and bootstrap percentile confidence intervals for LOGIT and LDA models (2000 bootstrap replications).*
+
+### Interpretation
+
+The AUC results reinforce earlier findings from error–rate analysis. The *best* and *best_optimized* models achieve the highest discrimination, while interpretable variants remain competitive and the parsimonious specification underperforms. Importantly, bootstrap confidence intervals closely overlap with cross–validation means, strengthening the assumption that our CV estimates are reliable and not optimistic. 
+
+At the same time, ROC bootstrap intervals highlight the cost of model simplicity: interpretable and parsimonious specifications carry visibly wider uncertainty bands, confirming greater variability in classification ability. This illustrates the trade-off between interpretability and performance, consistent with the patterns observed in error rates.
+
+Finally, it is worth noting that the bootstrap approach employed here is the **ordinary bootstrap**, meaning that resamples can include repeated observations from the original dataset. This limits the method’s quality compared to stratified or out-of-bag resampling methods. For this reason, we initially relied on extensive cross-validation (1000 iterations) to establish baseline estimates. The similarity in results between bootstrap and CV iterations gave us confidence in our results, but it's worth keeping this caveat in mind.
+
+**Figures of ROC curves, bootstrap AUC intervals, and confidence bands are provided in [Appendix E](#appendix-e) (Figs. [E1](#e1)–[E3](#e3)).**
+
+---
+
+## Conclusion
+
+This study combined rigorous statistical modeling with practical interpretation to evaluate the drivers of productivity in a garment factory. The binary outcome was analyzed through a multi-stage process: data cleaning, structural exploration, variable selection via shrinkage and subset methods, logistic regression modeling, probability estimation, and validation using bootstrap and ROC analysis. Each step was chosen to ensure that the resulting models are not only statistically robust but also meaningful for managerial decision-making.
+
+From a methodological standpoint, shrinkage methods (lasso, elastic net) and subset selection (`L0Learn`) highlighted **department** and **Team 8** as persistent predictors, with style changes, incentives, and temporal dummies providing additional explanatory power. Manual model specification allowed us to enrich these core predictors with interpretable interaction terms, balancing predictive performance with clarity. Validation through repeated cross-validation and bootstrap confirmed that our error estimates are stable, while AUC/ROC analysis demonstrated that the best models are consistent in classifying between successful and unsuccessful days, with mean AUC values around 0.83–0.84 for logit and 0.82–0.83 for LDA.
+
+For management, several actionable insights emerge:
+
+1. **Department-level differences dominate outcomes.**  
+   Sewing consistently outperforms Finishing in achieving targets, even after adjusting for incentives and workload. This indicates that structural differences in tasks and workflow are not the only drivers of productivity. Management should recognize that expectations for two departments must be set differently and resourcing adjusted accordingly.
+
+2. **Team-level heterogeneity is critical.**  
+   Teams 6, 7, 8, 9, 10, and 11 underperform relative to the baseline, and their response to incentives is weaker or inconsistent. By contrast, high-performing teams (1, 3, 4, 12) reliably exceed their targets without requiring additional overtime. This suggests that managerial attention should focus on training, supervision, or incentive redesign for the weaker teams, rather than applying uniform policies across the board.
+
+3. **Incentives are effective but non-linear.**  
+   The probability plots show that modest bonuses can quickly push Sewing teams above the target threshold, but additional increments yield diminishing returns. For weaker teams, incentives alone do not guarantee improvement suggesting at structural changes.
+
+4. **Overtime is reactive, not proactive.**  
+   The models suggest that overtime is often used to compensate for inefficiencies rather than to enhance productivity. Heavy reliance on overtime may therefore mask underlying workflow issues. Management should view overtime as a red flag rather than a solution, and investigate the root causes of delays.
+
+5. **Operational variables matter selectively.**  
+   Style changes consistently reduce the probability of hitting targets, but their impact varies by team. Teams 7, 8, and 10 show sharp drops when style changes occur, indicating that some groups are less adaptable to switching production lines. Targeted support during these transitions could mitigate disruptions.
+
+Overall, the modeling framework shows how statistical methods can directly support managerial decision-making. Shrinkage techniques helped us identify the most influential predictors with minimal noise, logistic regression provided interpretable relationships between predictors and success rates, and ROC analysis confirmed the models’ ability to reliably distinguish between high and low performance. Together, these steps ensure that our findings are not artifacts of overfitting, but reflect stable, reproducible patterns. For management, this translates into actionable guidance: incentives can be targeted where they are most effective, staffing adjustments can be based on evidence rather than intuition, and departmental differences can be managed with a clearer understanding of structural constraints. In short, the combination of rigorous modeling and robust validation strengthens confidence that recommended interventions will lead to measurable improvements in productivity.
+
+---
+
+# Appendix 
+
+## Appendix A{#appendix-a}
+
+[Back to Structural Patterns](#structural-patterns)
+
+### Appendix A1{#a1}
+  
+```{r fig.cap = "Figure A1. Department-Level Summary of Productivity and Staffing.", out.width="100%", echo=FALSE, message=FALSE, include=TRUE, warning=FALSE, fig.width=14, fig.height=12}
+
+patchwork_plots$dept_summary
+
+```
+
+### Appendix A2{#a2}
+
+```{r fig.cap = "Figure A2. Team-Level Incentive Summary.", out.width="100%", include=TRUE, fig.width=14, fig.height=12}
+
+patchwork_plots$team_incentive_summary
+
+```
+
+### Appendix A3{#a3}
+
+```{r fig.cap = "Figure A3. Team-Level Overtime Summary.", out.width="100%", include=TRUE, fig.width=14, fig.height=12}
+
+patchwork_plots$team_overtime_summary
+
+```
+
+### Appendix A4{#a4}
+
+```{r fig.cap = "Figure A4. Team-Level Operational Summary.", out.width="100%", include=TRUE, fig.width=12, fig.height=8}
+
+patchwork_plots$operational_summary
+
+```
+
+## Appendix B {#appendix-b}
+
+### Appendix B1{#b1} 
+
+[Back to Section Results](#results)
+
+```{r fig.cap = "Figure B1. Cross-Validation Error Rates for Classification Models.", out.width="100%", include=TRUE, fig.width=10, fig.height=7}
+
+cv_plots_patchwork
+
+```
+
+## Appendix C{#appendix-c}
+
+### Appendix C1{#c1}
+
+[Back to Probability Interpretation](#probability-interpretation)
+
+```{r fig.cap = "Figure C1. Probabilities of Success", out.width="100%", include=TRUE, fig.width=14, fig.height=7}
+
+probability_plot
+
+```
+
+## Appendix D{#appendix-d}
+
+### Appendix D1{#d1}
+
+[Back to Section Results](#results-bootstrap)
+
+```{r fig.cap = "Figure D1. Bootstrap vs CV Confidence Intervals", out.width="100%", include=TRUE, fig.width=12, fig.height=7}
+
+bootstrap_ci_plots
+
+```
+
+## Appendix E{#appendix-e}
+
+[Back to Section Results](#auc_roc-results)
+
+### Appendix E1{#e1}
+
+```{r fig.cap = "Figure E1. CV ROC Curves", out.width="100%", include=TRUE, fig.width=16, fig.height=7}
+
+patchwork_roc_graphs
+
+```
+
+### Appendix E2{#e2}
+
+```{r fig.cap = "Figure E2. Bootstrapped AUC at 95%", out.width="100%", include=TRUE, fig.width=12, fig.height=7}
+
+auc_ci_combined
+
+```
+
+### Appendix E3{#e3}
+
+```{r fig.cap = "Figure E3. Bootstrapped ROC at 95%", out.width="100%", include=TRUE, fig.width=12, fig.height=7}
+
+roc_ci_combined
+
+```
+
+## Appendix F{#appendix-f}
+
+### Appendix F1{#f1}
+
+Function F1. Estimating Classification Error via s-Fold, r-Repetition Cross-Validation.
+```{r, echo=TRUE, include=TRUE, class.source = 'fold-show'}
+
+cv.iteration_fn <- function(formulas = NULL, model_spec, data, s = 5, r = 50, rda_lambda = NA, rda_gamma = NA) {
+  m <- length(formulas)
+  cv.means <- matrix(data = NA, nrow = s, ncol = m, dimnames = list(NULL, paste(names(formulas))))
+  for (f in 1:m) {
+    cv.error.rep <- matrix(data = NA, nrow = r, ncol = s)
+    # Stratified folds
+    for (r in 1:r) {
+      folds <- caret::createFolds(data$y, k = s, list = F)
+      cv.errors <- rep(0, s)
+      # Function
+      for (j in 1:s) {
+        train_subset <- data[folds != j, ]
+        test_subset <- data[folds == j, ]
+        
+        if (model_spec == "LOGIT") {
+          fit <- stats::glm(formula = formulas[[f]], family = "binomial", data = train_subset)
+          probs <- predict(object = fit, newdata = test_subset, type = "response")
+          pred <- ifelse(probs > 0.5, 1, 0)
+        }
+        if (model_spec == "LDA") {
+          fit <- MASS::lda(formula = formulas[[f]], data = transform(train_subset, y = factor(y)))
+          probs <- predict(object = fit, newdata = test_subset)
+          pred <- as.integer(as.character(probs$class))
+        }
+        if (model_spec == "RDA") {
+          fit <- klaR::rda(formula = formulas[[f]], data = transform(train_subset, y = factor(y)), 
+                           lambda = rda_lambda, gamma = rda_gamma)
+          probs <- predict(object = fit, newdata = test_subset)
+          pred <- as.integer(as.character(probs$class))
+        }
+        cv.errors[j] <- 1 - mean(pred == test_subset$y) # Level 1: Storing error rates in cv.errors vector
+      }
+      cv.error.rep[r, ] <- cv.errors # Level 2: We take the mean CV error rate over r repetitions and store it in rows
+    }
+    cv.means[, f] <- colMeans(cv.error.rep) # Level 3: We take the the mean of error rates across all repetitions for each model m
+  }
+  return(cv.means)
+}
+
+```
+
+### Appendix F2{#f2}
+
+Function F2. Estimating kNN Classification Error via s-Fold, r-Repetition Cross-Validation. 
+```{r, echo=TRUE, include=TRUE, class.source = 'fold-show'}
+
+cv.iteration.knn_fn <- function(dataframes, k = 1, s = 5, r = 20) {
+  df <- length(dataframes)
+  cv.means <- matrix(data = NA, nrow = s, ncol = df, dimnames = list(NULL, paste(names(dataframes))))
+  for (d in 1:df) {
+    data <- dataframes[[d]]
+    
+    cv.error.rep <- matrix(NA, nrow = r, ncol = s)
+    
+    for (rep in 1:r) {
+      folds <- caret::createFolds(data$y, k = s, list = F)
+      cv.errors <- numeric(s)
+      
+      for (j in 1:s) {
+        # Data
+        train_subset <- data[folds != j, ]
+        test_subset <- data[folds == j, ]
+        # Requirements
+        X.train <- as.matrix(train_subset[, names(train_subset) != "y"])
+        X.test <- as.matrix(test_subset[, names(test_subset) != "y"])
+        Y.train <- factor(train_subset$y)
+        # Scale
+        mu = colMeans(X.train)
+        std = apply(X.train, 2, sd);std[std == 0] <- 1
+        
+        X.train <- scale(X.train, center = mu, scale = std)
+        X.test <- scale(X.test, center = mu, scale = std)
+        # Predictions
+        pred <- class::knn(train = X.train, test = X.test, cl = Y.train, k = k)
+        pred <- as.integer(as.character(pred))
+        
+        cv.errors[j] <- 1 - mean(pred == test_subset$y)
+      }
+      cv.error.rep[rep, ] <- cv.errors
+    }
+    cv.means[, d] <- colMeans(cv.error.rep)
+  }
+  return(cv.means)
+}
+
+```
+
+### Appendix F3{#f3}
+
+Function F3. Bootstrap Estimate of Classification Error via s-Fold CV.
+```{r, echo=TRUE, include=TRUE, class.source = 'fold-show'}
+
+boot.fn <- function(formula, data, idx, model_spec, s = 5) {
+  # data = chosen data frame
+  # idx = placeholder for boot()
+  # model_spec = Specify so we obtain model fit logic
+  # s = Number of folds, 5 is the default value
+  # k = Number of kNN's for knn algorithm, 1 is the default value
+  data <- data[idx, ] # Classic bootstrap, it's not the best
+  folds <- caret::createFolds(y = data$y, k = s, list = F)
+  cv.errors <- numeric(s)
+  
+  for (j in 1:s) {
+    train_subset <- data[folds != j, ]
+    test_subset <- data[folds == j, ]
+    
+    if (model_spec == "LOGIT") {
+      fit <- stats::glm(formula = formula, family = "binomial", 
+                        data = train_subset)
+      probs <- predict(object = fit, newdata = test_subset, type = "response")
+      pred <- ifelse(probs > 0.5, 1, 0)
+    }
+    if (model_spec == "LDA") {
+      fit <- MASS::lda(formula = formula, data = transform(train_subset, y = factor(y)))
+      probs <- predict(object = fit, newdata = test_subset)
+      pred <- as.integer(as.character(probs$class))
+    }
+    if (model_spec == "RDA") {
+      fit <- klaR::rda(formula = formula, data = transform(train_subset, y = factor(y)))
+      probs <- predict(object = fit, newdata = test_subset)
+      pred <- as.integer(as.character(probs$class))
+    }
+      cv.errors[j] <- 1 - mean(pred == test_subset$y)
+   }
+  mean(cv.errors)
+}
+
+```
+
+### Appendix F4{#f4}
+
+Function F4. Bootstrap Estimate of k-NN Classification Error via s-Fold CV.
+```{r, echo=TRUE, include=TRUE, class.source = 'fold-show'}
+
+boot.fn_knn <- function(dataframe, idx, k = 1, s = 5) {
+  data <- dataframe[idx, ]
+  folds <- caret::createFolds(y = data$y, k = 5, list = F)
+  cv.errors <- numeric(s)
+  #
+  for (j in 1:s) {
+    # Data
+    train_subset <- data[folds != j, ]
+    test_subset <- data[folds == j, ]
+    # Requirements
+    X.train <- as.matrix(train_subset[, names(train_subset) != "y"])
+    X.test <- as.matrix(test_subset[, names(test_subset) != "y"])
+    Y.train <- factor(train_subset$y)
+    # Scale
+    mu <- colMeans(X.train)
+    std <- apply(X.train, 2, sd);std[std == 0] <- 1
+    
+    X.train <- scale(X.train, center = mu, scale = std)
+    X.test <- scale(X.test, center = mu, scale = std)
+    # Predict
+    pred <- class::knn(train = X.train, test = X.test, cl = Y.train, k = k)
+    pred <- as.integer(as.character(pred))
+    
+    cv.errors[j] <- 1 - mean(pred == test_subset$y)
+  }
+  mean(cv.errors)
+}
+
+```
+
+# Appendix F5{#f5}
+
+Function F5. ROC AUC Estimation via s fold CV. 
+```{r, echo=TRUE, include=TRUE, class.source = 'fold-show'}
+
+roc.fn <- function(formulas, data, model_spec, s = 5) {
+  # Stratified folds
+  folds <- caret::createFolds(y = data$y, k = s, list = F)
+  # Storage
+  results <- vector(mode = "list", length(formulas))
+  
+  # Function
+  for (f in seq_along(formulas)) {
+    auc_values <- numeric(s)
+    all_roc <- vector(mode = "list", length = s)
+    
+    for (j in 1:s) {
+      # Data
+      train_subset <- data[folds != j, ]
+      test_subset  <- data[folds == j, ]
+      # Function 
+      if (model_spec == "LOGIT") {
+        fit <- stats::glm(formula = formulas[[f]], family = "binomial", data = train_subset)
+        probs <- predict(fit, newdata = test_subset, type = "response")
+      }
+      if (model_spec == "LDA") {
+        fit <- MASS::lda(formula = formulas[[f]], data = transform(train_subset, y = factor(y)))
+        probs <- predict(fit, newdata = test_subset)$posterior[, 2]
+      }
+      if (model_spec == "RDA") {
+        fit <- klaR::rda(formula = formulas[[f]], data = transform(train_subset, y = factor(y)))
+        probs <- predict(fit, newdata = test_subset)$posterior[, 2]
+      } 
+    roc_obj <- pROC::roc(test_subset$y, probs)
+    auc_values[j] <- pROC::auc(roc_obj)
+    all_roc[[j]] <- roc_obj
+    }    
+     # Return list
+    results[[f]] <- list(
+    formula = deparse(formulas[[f]]),
+    auc_mean = mean(auc_values),
+    auc_sd   = sd(auc_values),
+    rocs     = all_roc
+    )
+  }
+  results
+}
+
+```
