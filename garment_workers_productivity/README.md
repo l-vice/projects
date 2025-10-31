@@ -1,72 +1,47 @@
-Garment Worker Productivity Classification
+# Garment Worker Productivity Classification  
+## Statistical Analysis — LBK
 
-Machine Learning Project — Computational Finance I
+---
 
-
-
-Objective
-
----------
-
+## Objective
 Predict whether garment workers in Bangladesh meet daily production targets based on behavioral, environmental, and management-related variables.
 
+---
 
+## Methodology
+- **Dataset:** Garment Worker Productivity dataset (UCI Machine Learning Repository)  
+- **Target Variable:** achieved_target (binary)  
+- **Models Evaluated:** Logistic Regression, Linear Discriminant Analysis (LDA), Quadratic Discriminant Analysis (QDA), Regularized Discriminant Analysis (RDA), and k-Nearest Neighbors (k-NN)  
+- **Validation Approach:** 10-fold cross-validation and bootstrap AUC comparison  
+- **Evaluation Metrics:** Accuracy, AUC, F1-score, Precision, Recall  
 
-Methodology
+---
 
-------------
+## Key Results
+- **Best Model:** Regularized Discriminant Analysis (RDA)  
+- **Average AUC:** 0.87 (RDA) vs 0.83 (LDA) vs 0.79 (k-NN)  
+- Logistic Regression performed best in interpretability.  
+- **Top Predictors:** Workload, incentive type, and department.  
 
-\- Data: Garment Worker Productivity dataset (UCI)
+---
 
-\- Target: Achieved Target (binary)
+## Tools
+- **Language:** R  
+- **Packages:** MASS, caret, ggplot2, boot  
+- **Platform:** Windows 11  
+- **Version Control:** Git + GitHub  
 
-\- Models: Logistic Regression, LDA, QDA, RDA, and k-NN
+---
 
-\- Validation: 10-fold cross-validation, bootstrap AUC comparison
+## References
+- Bisgaard & Travis (1991). *Analysis of Productivity in Garment Manufacturing.*  
+- UCI Machine Learning Repository — Garment Worker Productivity Dataset.  
+- Bruce, Bruce & Gedeck (2020). *Practical Statistics for Data Scientists.*  
 
-\- Evaluation Metrics: Accuracy, AUC, F1-score, Precision, Recall
+---
 
-
-
-Key Results
-
-------------
-
-\- Best model: Regularized Discriminant Analysis (RDA)
-
-\- Average AUC: 0.87 (RDA) vs 0.83 (LDA) vs 0.79 (k-NN)
-
-\- Logistic Regression performed best in interpretability
-
-\- Workload, incentive type, and department were top predictors
-
-
-
-Tools
-
------
-
-Language: R  
-
-Packages: MASS, caret, ggplot2, boot  
-
-Platform: Windows 11  
-
-Version Control: Git + GitHub
-
-
-
-Author
-
-------
-
-Luka Bojovic  
-
-Email: lukabojovic@gmail.com  
-
-LinkedIn: linkedin.com/in/lukabojovic  
-
-GitHub: github.com/lukabojovic
-
-
-
+## Author
+**Luka Bojovic**  
+[lukabojovic@gmail.com](mailto:lukabojovic@gmail.com)  
+[linkedin.com/in/lukabojovic](https://linkedin.com/in/lukabojovic)  
+[github.com/lukabojovic](https://github.com/lukabojovic)
