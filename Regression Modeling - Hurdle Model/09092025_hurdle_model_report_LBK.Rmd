@@ -1,0 +1,211 @@
+---
+title: "BDA - A Report on Hurdle Models"
+author: "LBK"
+date: "2025-09-09"
+output: html_document
+---
+``` {r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  fig.width = 10,
+  fig.height = 7
+)
+
+```
+# 1. Introduction
+
+Household purchase data often contain many **zeros** (months where no purchase occurs).  
+Standard count models such as the Negative Binomial may fail in this setting because they assume that zeros and positive counts arise from the same underlying process. In reality, consumer behavior often involves two separate stages:  
+first, the decision **whether to purchase at all**, and second, the decision **how many items to purchase**.  
+This leads to the problem of **zero inflation**.
+
+We compare three approaches:
+
+1. **Zero-only model (BI):** a binary logistic regression predicting whether a purchase occurs (`item = 0` vs `item > 0`).  
+2. **Count-only model (NBI):** a Negative Binomial regression predicting the number of items purchased (including zeros).  
+3. **Hurdle model (ZINBI):** a zero-inflated Negative Binomial, which combines  
+   - a binary logistic sub-model for the probability of being a structural zero (ν), and  
+   - a Negative Binomial sub-model for the expected number of items among buyers (μ).  
+
+Our goal is to show why the hurdle model (ZINBI) provides the best fit for this dataset, both statistically and behaviorally, by explicitly modeling the excess zeros and separating the participation and intensity decisions.
+
+# 2. Data
+
+```{r, echo=FALSE, include=FALSE}
+
+LoadLibraries <- function() {
+  require(tidyverse) # general
+  require(gamlss) # core, modeling
+  require(gamlss.dist) # gamlss distribution family
+}
+
+LoadLibraries()
+
+```
+
+```{r}
+
+df <- read.csv(file = "CustomersData.csv")
+# Preview of the data structure
+str(df)
+# Preview of target
+summary(df$item)
+# Proportion of zeros
+mean(df$item == 0)
+
+```
+# 3 Data Preparation
+
+Before fitting the models, the dataset was cleaned and transformed to ensure variables were in the correct format for analysis. In particular, categorical variables were recoded into numeric indicators suitable for regression modeling, and seasonal effects were captured through derived variables. Specifically, gender was recoded as a binary variable (Female = 0, Male = 1), and a holiday-season dummy (`xmas`) was created to capture the effect of October, November and December, where average purchases were noticeably higher. In addition, a binary `purchase` variable was constructed to distinguish between non-buyers (item = 0) and buyers (item > 0), which is required for the binary model specification. Exploratory tables and plots were generated to verify these transformations and to illustrate the distribution of purchases across customers and time.
+
+
+```{r}
+
+# Gender
+gender <- rep(0, 24000)
+gender[df$gender == "M"] = 1
+df$gender <- gender
+
+# Christmas season: months October, November, and December
+xmas <- rep(0, 24000)
+xmas[df$monthnumb %in% c(10, 11, 12, 22, 23, 24)] = 1
+df$xmas <- xmas
+
+# Purchase dummy for binary model
+purchase <- rep(0, 24000)
+purchase[df$item > 0] = 1
+df$purchase <- purchase
+
+
+# Check coding
+table(df$gender)
+table(df$xmas)
+prop.table(table(df$purchase))
+```
+
+## 3.1 Exploratory Tables and Plots
+
+We first examine the distribution of purchases (`item`), the proportion of purchases by gender, and seasonal variation across months.
+
+```{r}
+# Distribution of items purchased
+hist(df$item, breaks = 20, col = "gray", border = "black",
+     main = "Distribution of Items Purchased",
+     xlab = "Number of Items",
+     ylab = "Frequency")
+```
+
+Most households purchase zero items, confirming that the target variable is zero-inflated.
+
+```{r}
+# Purchase Proportion by gender
+gender_table <- table(Gender = df$gender, Purchase = df$purchase)
+prop.table(gender_table, margin = 1)
+
+barplot(prop.table(gender_table, margin = 1),
+        beside = T, col = c("grey70", "steelblue"),
+        legend = T,
+        args.legend = list(title = "Purchase", x = "topright"),
+        main = "Purchase Probability by Gender",
+        ylab = "Proportion")
+```
+
+Both males and females purchase at similar rates.
+
+```{r}
+# Average items per month - seasonality
+mean_items <- tapply(df$item, df$monthnumb, mean)
+
+plot(mean_items, type = "o", pch = 16, col = "darkgreen", main = "Average Items per Month",
+     xlab = "Month Number", ylab = "Mean Items")
+abline(v = c(10, 11, 12, 22, 23, 24), col = "red", lty = 2)
+
+```
+
+Purchase rises sharply in October, November and December indicating that there is seasonality in the data. This justifies including `xmas` as a dummy variable.
+
+# 4. Empirical Models
+
+In this section, we estimate three models of household purchase behavior, each representing a different way of handling the large number of zeros in the data.
+
+## 4.1 Model 1: Zero-only
+
+We first fit a **binary logistic model** to predict whether a purchase occurred. This captures the participation decision but ignores the number of items purchased.
+
+```{r, echo=FALSE}
+
+mod.01 <- gamlss(purchase ~ catalogpromo + pricepromo + 
+                   retailpromo + married + gender + 
+                   income + xmas + random(as.factor(id)), 
+                 family = BI, data = df, trace = F
+                 ) 
+summary(mod.01)
+plot(mod.01)
+```
+
+The results show which covariates influence the probability of purchase. However, this model cannot capture purchase intensity among buyers.
+
+## 4.2 Model 2: Count-only
+
+Next, we fit a **Negative Binomial model** on the raw item counts, including zeros. This accounts for overdispersion but forces zeros and positive counts to be explained by the same mechanism.
+
+```{r, echo=FALSE}
+
+mod.123 <- gamlss(item ~ catalogpromo + pricepromo +
+                    retailpromo + married + gender +
+                    income + xmas + random(as.factor(id)),
+                  family = NBI, data = df, trace = F
+                  )
+summary(mod.123)
+plot(mod.123)
+
+```
+
+The diagnostic plots indicate that the Negative Binomial model provides some flexibility through overdispersion, but it still struggles to explain the large number of zeros in the data. The residual and worm plots show misfit in the lower tail, reflecting the excess of zero outcomes that the model cannot capture.
+
+## 4.3 Model 3: Hurdle model
+
+Finally, we fit a **Zero-Inflated Negative Binomial (ZINBI)** model, which integrates the binary and count processes into a single framework:
+
+- **Count component:**: expected number of items among buyers.
+  $$ \mu = E[Y \mid Y > 0], \quad \text{link: log} $$
+
+- **Zero-inflation component:**: probability of purchase, or a structural component equivalent to binary logistic hurdle.
+  $$ \nu = P(Y = 0 \; \text{structural}), \quad \text{link: logit} $$
+```{r, echo = F}
+
+# mod.0123 <- gamlss(formula = item ~ catalogpromo + pricepromo + 
+#                     retailpromo + married + gender + 
+#                     income + xmas + random(as.factor(id)),
+#                   nu.formula = ~ catalogpromo + pricepromo + retailpromo + 
+#                     married + gender + income +
+#                     xmas + random(as.factor(id)),
+#                   family = ZINBI, data = df, trace = F
+#                   )
+mod.0123 <- read_rds(file = "hurdle_model_zinbi")
+
+summary(mod.0123)
+plot(mod.0123)
+
+```
+
+This model explicitly separates the decision to buy from the number of items purchased once buying occurs, providing a natural hurdle interpretation.
+
+The diagnostic plots indicate a clear improvement in fit compared to the standard Negative Binomial. Residuals are more evenly distributed, the density estimate is closer to normal, and the Q-Q plot shows better alignment with theoretical quantiles. Minor deviations remain in the tails, but overall the model successfully captures both the zero-inflation and count components of the data.
+
+# 5. Conclusion
+
+This analysis compared three approaches to modeling household purchases:  
+1. A **binary-only model (BI)**, which captures whether a purchase occurs but ignores purchase intensity.  
+2. A **count-only model (NBI)**, which models the number of items purchased but forces zeros and positive counts to be explained by the same mechanism.  
+3. A **hurdle model (ZINBI)**, which integrates the binary participation decision and the count intensity process within a single framework.
+
+The results highlight the limitations of the first two models. The binary-only model cannot capture item counts and is therefore incomplete. The count-only model accounts for overdispersion but still fails to explain the high frequency of zeros, leading to systematic misfit.  
+
+In contrast, the hurdle model (ZINBI) provides a superior fit by explicitly modeling both the decision to buy and the quantity purchased. Its two-part structure—$\nu$ for the probability of structural zeros and $\mu$ for expected counts among buyers—aligns closely with real consumer behavior: households must first decide **whether to purchase** and then decide **how much to buy**. Diagnostic checks confirmed that the hurdle model substantially improves the residual distribution and overall fit compared to simpler alternatives.
+
+**In conclusion, the hurdle model is the most appropriate approach for this dataset, as it balances statistical fit with behavioral interpretability, making it the best tool for analyzing household purchase patterns in the presence of excess zeros.**
+
