@@ -1,0 +1,744 @@
+---
+title: "YouTube Engagement - Modeling Summary"
+author: "LV"
+date: "2025-08-12"
+
+output: 
+html_document:
+  toc: true
+  toc_float: true
+  number_sections: true
+  code_folding: hide
+  theme: flatly
+  highlight: tango
+  df_print: paged
+  fig_caption: true
+  fig_width: 8
+  fig_height: 5
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  fig.width = 8,
+  fig.height = 5,
+  dpi = 150)
+
+set.seed(1)
+
+```
+
+## Load Libraries
+
+```{r}
+
+LoadLibraries <- function() {
+  require(tidyverse)
+  require(readxl)
+}
+
+LoadLibraries()
+
+```
+
+*RStudio: Checkpoint 1*
+
+# Data Preprocessing
+
+We moved to RStudio, as Orange3 does not provide the functionality needed for EDA or for creating variables like age_days and duration_bucket. We note this as a limitation when working with Orange3.
+
+```{r}
+
+df <- read_excel("Data/rossman_variables_raw.xlsx")
+
+```
+
+```{r, echo=FALSE}
+
+cat("Column names:\n")
+(colnames(df))
+
+```
+
+## Data Preparation: Variable Creation & Removal
+
+```{r}
+
+df <- df %>% # Remove variables with near constant features
+  dplyr::select(
+    -topic_categories, -viewers_peak,
+    -actual_end, -actual_start,
+    -location_lng, -location_lat,
+    -location_desc, -recording_date,
+    -made_for_kids, -license,
+    -privacy_status, -favorite_count,
+    -dimension, -duration_iso,
+    -default_audio_lang, -default_lang,
+    -tags, -description,
+    -channel_title, -channel_id,
+    -title, -video_id
+  ) %>% # Duration
+  mutate(
+    duration_seconds = as.numeric((lubridate::hms(duration_hms))),
+    duration_bucket = cut(
+      duration_seconds,
+      breaks = c(-Inf, 480, 1200, Inf),
+      labels = c("<8m", "8-20m", ">20m"),
+      right = T
+    )
+  ) %>% # Time
+  mutate(
+    published_at = ymd_hms(published_at, tz = "UTC"),
+    age_days = as.numeric(difftime(Sys.time(), published_at, units = "days")),
+    weekday = wday(published_at, label = T, week_start = 1),
+    weekend = as.integer(weekday %in% c("Sat", "Sun")),
+    hour = hour(published_at),
+    month = month(published_at, label = T)
+  ) %>% # Age
+  mutate(
+    age_bin = cut(
+      age_days,
+      breaks = c(-Inf, 6, 30, 90, 180, 365, 730, 1095, Inf),
+      labels = c("0–6d", "1–4w", "1–3m", "3–6m", "6–12m", "1–2y", "2–3y", "3y+"),
+      right = TRUE
+    )
+  ) %>% # Convert to factors
+  mutate(
+    category_id = factor(category_id),
+    hour = factor(hour)
+  ) %>% # Remove leftovers
+  dplyr::select(-duration_hms, -published_at)
+
+```
+
+```{r, echo=FALSE}
+
+cat("Number of rows after filtering:", nrow(df), "\n")
+cat("Column names:\n")
+print(colnames(df))
+
+```
+## Binary Encoding of Two-Level Factors
+
+We convert all two-level factors into binary (0/1) indicator variables to improve compatibility and performance in Orange3.
+
+```{r}
+
+bin_map <- c(
+  caption = "true",
+  definition = "hd",
+  projection = "360",
+  upload_status = "processed",
+  licensed_content = TRUE
+)
+
+df <- df %>%
+  mutate(
+    across(all_of(names(bin_map)),
+           ~ as.integer(.x == bin_map[cur_column()]),
+           .names = "is_{.col}")
+  ) %>%
+  dplyr::select(-all_of(names(bin_map)))
+
+```
+
+```{r, echo=FALSE}
+
+cat("Column names:\n")
+print(colnames(df))
+
+```
+
+## Screening for Near-Constant Features
+
+We flagged features as near-constant when the dominant class proportion was ≤ 0.05 or ≥ 0.95. Based on this criterion, 5 variables were removed for failing the distribution requirement.
+
+```{r}
+
+df <- df %>%
+  dplyr::select(-all_of(
+    df %>%
+      dplyr::select(starts_with("is_")) %>%
+      dplyr::summarise(across(everything(), ~ mean(.x, na.rm = TRUE))) %>%
+      tidyr::pivot_longer(cols = everything(), names_to = "var", values_to = "mean") %>%
+      dplyr::filter(mean <= 0.05 | mean >= 0.95) %>%
+      dplyr::pull(var)
+  ))
+
+```
+
+```{r, echo=FALSE}
+
+cat("Column names:\n")
+print(colnames(df))
+
+```
+
+## Filtering out past livestreams 
+
+Records flagged as past live streams are removed so that modelling focuses exclusively on regular videos since that is our assignment objective.
+
+```{r}
+
+df <- df %>%
+  filter(was_livestream != TRUE) %>%
+  dplyr::select(-was_livestream)
+
+```
+
+```{r, echo=FALSE}
+
+cat("Number of rows after filtering:", nrow(df), "\n")
+cat("Column names:\n")
+print(colnames(df))
+
+```
+
+## Save the dataframe
+
+Finally, we save the data frame and proceed to modelling in Orange. These variables constitute our initial selection after preprocessing.
+
+```{r}
+
+# write.csv(x = df, file = "rossman_vars.csv", row.names = F)
+
+```
+
+*RStudio: Checkpoint 2*
+
+# Importing the Orange-Selected Feature Set
+
+We load the variables selected in Orange to continue the numerical and categorical analysis.
+
+```{r}
+
+selected_features <- read.csv("Data/rossman_vars_select_final.csv")
+
+```
+
+```{r, echo=FALSE}
+
+colnames_tbl <- tibble::tibble(
+  `#` = seq_along(selected_features),
+  Name = names(selected_features)
+)
+
+print.data.frame(colnames_tbl, row.names = F)
+
+```
+
+## Baseline Linear Model
+
+Before applying any transformations, we fit a baseline linear model to establish a benchmark. This will let us evaluate whether subsequent feature changes improve performance and warrant adoption.
+
+**Important: This R² is not for reporting; we use Orange results only. Included solely to gauge whether transformations improve the model.** 
+
+```{r}
+
+initial.mod <- lm(formula = like_view_ratio ~ comment_view_ratio + month + age_days + category_id +
+                    age_bin + duration_bucket + duration_seconds + comment_count + view_count, data = selected_features)
+
+```
+
+```{r, echo=FALSE}
+
+cat(sprintf("R² = %.3f", summary(initial.mod)$adj.r.squared), "\n")
+
+```
+## Data Preparation: Numeric and Categorical
+
+We separate features into numeric and categorical frames for clearer exploration.
+
+```{r}
+
+selected_features <- selected_features %>%
+  dplyr::mutate(
+    month = factor(month),
+    category_id = factor(category_id),
+    age_bin = factor(age_bin),
+    duration_bucket = factor(duration_bucket)
+  )
+
+numerical_features <- selected_features %>%
+  dplyr::select(
+    like_view_ratio, comment_view_ratio,
+    age_days, duration_seconds,
+    comment_count, view_count
+  )
+
+categorical_features <- selected_features %>%
+  dplyr::select(
+    month, category_id,
+    age_bin, duration_bucket
+  )
+
+```
+
+```{r, echo=FALSE}
+
+cat(sprintf("Total features: %d -> %s\n", ncol(selected_features), paste(names(selected_features), collapse = ", ")))
+
+cat(sprintf("Numeric features: %d -> %s\n", ncol(numerical_features), paste(names(numerical_features), collapse = ", ")))
+
+cat(sprintf("Categorical features: %d -> %s\n", ncol(categorical_features), paste(names(categorical_features), collapse = ", ")))
+
+```
+
+## Numerical Variables
+
+We inspect non-normality in our variables.
+
+```{r, echo=FALSE, fig.width=10, fig.height=12, warning=FALSE, message=FALSE}
+
+par(mfrow = c(3, 2))
+
+for (v in names(numerical_features)) {
+  qqnorm(numerical_features[[v]], main = v)
+  qqline(numerical_features[[v]])
+}
+
+par(mfrow = c(1, 1))
+
+```
+
+## Kurtosis diagnostics
+
+To confirm the visual non-normality, we compute kurtosis for each variable. We target ≈ 3 and consider 2<x<4  acceptable. We then test log/Box–Cox transformations to bring outliers into this band.
+
+```{r}
+
+kurtosis_test_initial <- dplyr::reframe(numerical_features,
+                 dplyr::across(where(is.numeric), ~ moments::kurtosis(., na.rm = T))) %>%
+  tidyr::pivot_longer(everything(), names_to = "Variable", values_to = "Kurtosis") %>%
+  dplyr::arrange(desc(Kurtosis))
+
+print.data.frame(kurtosis_test_initial)
+
+```
+
+## Log Transformations
+
+Visual diagnostics and kurtosis statistics both indicate heavy tails. Several variables therefore require transformation. We test log transformations to see whether they reduce kurtosis toward the 2–4 range.
+
+```{r}
+
+log_transformations <- numerical_features %>%
+    dplyr::mutate(
+    log1p_like_view_ratio = log1p(like_view_ratio),
+    log1p_comment_view_ratio = log1p(comment_view_ratio),
+    log1p_duration_seconds = log1p(duration_seconds),
+    log1p_view_count = log1p(view_count),
+    log1p_comment_count = log1p(comment_count)
+  ) %>%
+  select(
+    -like_view_ratio,-comment_view_ratio,
+    -duration_seconds, -view_count,
+    -comment_count, -age_days
+  )
+
+```
+
+
+```{r, echo=FALSE}
+
+par(mfrow = c(3, 2))
+
+for (v in names(log_transformations)) {
+  qqnorm(log_transformations[[v]], main = v)
+  qqline(log_transformations[[v]])
+}
+
+par(mfrow = c(1, 1))
+
+```
+
+## Kurtosis test after Log Transformation
+
+Re-evaluating kurtosis shows clear improvement. We now quantify the distance to normality (ideal ≈ 3; acceptable 2–4).
+
+```{r}
+
+kurtosis_test_log <- dplyr::reframe(
+  log_transformations,
+  dplyr::across(where(is.numeric), ~ moments::kurtosis(., na.rm = T)) %>%
+    tidyr::pivot_longer(everything(), names_to = "Variable", values_to = "Kurtosis") %>%
+    dplyr::arrange(desc(Kurtosis))
+)
+
+print.data.frame(kurtosis_test_log)
+
+```
+
+## Consideration of other transformations, Box-Cox method
+
+Log transforms brought view_count, like_view_ratio, and comment_view_ratio under the target kurtosis (< 4), so we keep them. However, since comment_view_ratio didn’t respond well to log, we apply a Box–Cox transform instead. We do the same for duration_seconds.
+
+**Note: We do not re-estimate λ in R; we reuse the λ values obtained in Orange.** 
+
+
+```{r}
+
+# comment_view_ratio
+# The first step is to nudge the variable by a minimal amount, say 1e-6 in order to fulfill the X > 0 rule in the Box-Cox formula.
+comment_view_ratio_bxcx <- numerical_features$comment_view_ratio + 1e-6
+
+# To find lambda, MASS::boxcox function needs a model fit to estimate the best transformation (λ value) for the dependent variable
+# cvr_bxcx <- lm(comment_view_ratio ~ 1, data = (numerical_features*0.8)) 
+# lambda.cvr <- cvr_bxcx$x[which.max(cvr_bxcx$y)]
+lambda.cvr <- 0.3174754857788154 # We will use this value since we already computed λ for comment_view_ratio in Orange through a Python script. The value was computed on 0.8 of the data so there will be no data leakage on the test set.
+# The steps here are described just to show the process for convenience. We should refer to the python_script inside Orange3 wf.
+
+bxcx_comment_view_ratio <- if (lambda.cvr == 0) {
+  log(comment_view_ratio_bxcx)
+} else {
+  (comment_view_ratio_bxcx^lambda.cvr - 1) / lambda.cvr
+}
+
+# duration_seconds
+duration_seconds_bxcx <- numerical_features$duration_seconds
+
+# We follow the same process
+# ds_bxcx <- lm(duration_seconds ~ 1, data = (numerical_features * 0.8))
+# lambda.ds <- ds_bxcx$x[which.max(ds_bxcx$y)]
+lambda.ds <- 0.18964913615480788 # Already computed in Orange3 so we will use that value
+
+bxcx_duration_seconds <- if (lambda.ds == 0) {
+  log(duration_seconds_bxcx)
+} else {
+  (duration_seconds_bxcx^lambda.ds - 1) / lambda.ds
+}
+
+# Let's save the results in a df
+
+bxcx_transformations <- data.frame(
+  bxcx_comment_view_ratio = bxcx_comment_view_ratio,
+  bxcx_duration_seconds = bxcx_duration_seconds
+)
+
+# Let's plot to see the results
+
+```
+
+```{r, echo=FALSE}
+
+par(mfrow = c(1, 2))
+
+for (v in names(bxcx_transformations)) {
+  qqnorm(bxcx_transformations[[v]], main = v)
+  qqline(bxcx_transformations[[v]])
+}
+
+par(mfrow = c(1, 1))
+
+```
+
+## Kurtosis test after Box-Cox transformations
+
+Visuals indicate improvement; we now quantify it with kurtosis. We target ≈ 3 and treat 2–4 as acceptable.
+
+```{r}
+
+kurtosis_test_boxcox <- dplyr::reframe(bxcx_transformations,
+               dplyr::across(where(is.numeric), ~ moments::kurtosis(., na.rm = T))) %>%
+  tidyr::pivot_longer(everything(), names_to = "Variable", values_to = "Kurtosis") %>%
+  dplyr::arrange(desc(Kurtosis))
+
+print.data.frame(kurtosis_test_boxcox)
+
+```
+
+
+
+## Refit to Assess Improvement
+
+We refit a comparable linear model using transformed features and compare adjusted R² to the baseline.
+
+```{r}
+
+numeric.mod <- lm(log_transformations$log1p_like_view_ratio ~ bxcx_transformations$bxcx_comment_view_ratio +
+                    categorical_features$month + numerical_features$age_days + 
+                    selected_features$category_id + selected_features$age_bin + selected_features$duration_bucket +
+                    bxcx_transformations$bxcx_duration_seconds + log_transformations$log1p_comment_count +
+                    log_transformations$log1p_view_count
+                    )
+
+```
+
+```{r, echo=FALSE}
+
+cat(sprintf("R² = %.3f", summary(numeric.mod)$adj.r.squared), "\n")
+
+```
+
+## Final assessment of numeric transformations
+
+We successfully normalized our variables to an acceptable degree (Kurtosis <4). The results are the following:
+
+1. `view_count = log(view_count + 1)` — **Kurtosis = 3.84**
+2. `like_view_ratio = log(like_view_ratio + 1)` — **Kurtosis = 3.48**
+3. `comment_count = log(comment_count + 1)` — **Kurtosis = 3.30**
+4. `comment_view_ratio = ((comment_view_ratio + 1e-6)^0.3174754857788154 - 1) / 0.3174754857788154` — **Kurtosis = 3.11**
+5. `duration_seconds = ((duration_seconds + 0)^0.18964913615480788 - 1) / 0.18964913615480788` — **Kurtosis = 3.61**
+
+These transformations bring distributions into the desired range and yielded a modest improvement in adjusted R².
+
+We used R for QQ plots and kurtosis test from moments package to guide and verify transformations as these tools are not available in Orange3. With this roadmap, we will now replicate these transformations in Orange as required, and then proceed to analyze categorical variables.
+
+## Categorical Variables
+
+Let's see the proportion of observations that are in each level of a category
+
+```{r}
+
+lapply(categorical_features, function(x) prop.table(table(x)))
+
+```
+
+## Frequency analysis and level consolidation
+
+Several levels of category_id and age_bin have negligible support. To improve statistical stability and interpretability, we consolidate sparse levels as follows:
+
+category_id — Merge all levels with < 2% of observations (≈ 66 out of 3315) into “Other.”
+
+age_bin — Combine the first two levels (0–6d and 1–4w) into ≤1m.
+
+This reduces noise from rarely occurring categories and yields more reliable estimates in downstream modelling.
+
+```{r}
+
+# category_id
+
+cutoff <- round(nrow(categorical_features)*0.02)
+
+categorical_features <- categorical_features %>%
+  dplyr::mutate(
+    category_id = fct_lump_min(f = category_id, min = cutoff, other_level = "Other"),
+    category_id = fct_drop(category_id),
+    age_bin = fct_collapse(
+      age_bin,
+      `<=1m` = c("0-6d", "1-4w"),
+      `1-3m` = "1-3m",
+      `3-6m` = "3-6m",
+      `6-12m` = "6-12m",
+      `1-2y` = "1-2y",
+      `2-3y` = "2-3y",
+      `3y+` = "3y+"
+    )
+  )
+
+```
+
+```{r, echo=FALSE}
+
+levels_with_counts <- bind_rows(
+  categorical_features %>% count(Level = category_id, name = "Count") %>% mutate(Feature = "category_id"),
+  categorical_features %>% count(Level = age_bin,     name = "Count") %>% mutate(Feature = "age_bin")
+) %>%
+  group_by(Feature) %>%
+  mutate(Proportion = Count / sum(Count)) %>%
+  ungroup() %>%
+  arrange(Feature, desc(Count))
+
+print.data.frame(levels_with_counts)
+
+```
+
+## Refit to assess categorical consolidation
+
+We refit the baseline linear model after merging sparse levels in category_id and age_bin and compare performance to the pre-consolidation benchmark.
+
+```{r}
+
+categorical.mod <- lm(selected_features$like_view_ratio ~ selected_features$comment_view_ratio + categorical_features$month + 
+                        selected_features$age_days + categorical_features$category_id + 
+                        categorical_features$age_bin + categorical_features$duration_bucket +
+                        selected_features$duration_seconds + selected_features$comment_count +
+                        selected_features$view_count
+                        )
+
+```
+
+```{r, echo=FALSE}
+
+cat(sprintf("R² = %.3f", summary(categorical.mod)$adj.r.squared), "\n")
+
+```
+
+## Variable optimization conclusion
+
+Transforming both numerical and categorical variables improved model fit and the distributional quality of our features (kurtosis brought into the 2–4 band for key variables). We will keep these changes and replicate them in Orange.
+
+Adjusted R² (internal benchmark):
+
+Baseline (initial.mod): 0.582
+
+After categorical consolidation (categorical.mod): 0.605 (Δ +0.023 vs baseline)
+
+After numeric transformations (numeric.mod): 0.641 (Δ +0.059 vs baseline; +0.036 vs categorical)
+
+Interpretation.
+The categorical merges reduce noise from sparsely populated levels, yielding a modest gain. The numerical transformations (log/Box–Cox) address heavy tails and stabilize variance, delivering the larger improvement in explanatory power.
+
+**Note: These are adjusted R² values used for internal guidance; the report will use metrics computed in Orange.**
+
+*RStudio: Checkpoint 3*
+
+# Plots
+
+We use R to produce higher-quality prediction plots, since Orange3’s plotting is limited. These figures supplement the plots generated in Orange.
+
+## Load time series data
+
+```{r}
+
+timeseries_data <- read.csv(file = "Data/final_data_timeseries_test_orange_predictions.csv")
+
+timeseries_data <- timeseries_data %>%
+  mutate(
+    published_at = as.POSIXct(x = published_at, format = "%m/%d/%Y",
+                              tz = "UTC"),
+    month = factor(month),
+    age_bin = factor(age_bin),
+    duration_bucket = factor(duration_bucket),
+    category_id = factor(category_id)
+  )
+
+# Data table to parse model information for our plots
+
+timeseries_data_mods <- timeseries_data %>%
+  dplyr::select(published_at,
+                actual = log1p_like_view_ratio,
+                mod_lm, mod_xgboost, mod_rf, mod_adb
+                ) %>%
+  tidyr::pivot_longer(
+    cols = starts_with("mod_"),
+    names_to = "model",
+    values_to = "pred"
+  ) %>%
+  dplyr::mutate(
+    model = recode(
+      model,
+      "mod_lm" = "Linear Regression",
+      "mod_rf" = "Random Forest",
+      "mod_xgboost" = "XGBoost",
+      "mod_adb" = "AdaBoost"
+    ),
+    model = factor(model, levels = c("Linear Regression", "Random Forest", "XGBoost", "AdaBoost")),
+    resid = actual - pred
+  )
+
+# Let's add a smoothed table - the aim is to transform this into a non-stationary time series so we better capture structural changes.
+
+timeseries_data_mods_smoothed <- timeseries_data_mods %>%
+  group_by(model) %>%
+  dplyr::arrange(published_at) %>%
+  dplyr::mutate(
+    actual_smooth = zoo::rollmean(actual, k = 7, fill = NA, align = "right"),
+    pred_smooth = zoo::rollmean(pred, k = 7, fill = NA, align = "right")
+  ) %>%
+  ungroup()
+
+# Let's create a custom color selection
+
+color_selection <- c(
+  "Actual" = "black",
+  "Linear Regression" = "blue",
+  "Random Forest" = "darkred",
+  "XGBoost" = "steelblue",
+  "AdaBoost" = "red"
+  )
+
+```
+
+## Scatter plot of Predictive accuracy
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+ggplot(timeseries_data_mods, aes(x = actual, y = pred)) +
+  geom_point(alpha = 0.5, size = 1.4) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", linewidth = 0.6) +
+  geom_smooth(method = "lm", se = F, linewidth = 0.8) +
+  facet_wrap(~ model, ncol = 2) +
+  labs(
+       x = "Actual",
+       y = "Predicted") +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    panel.spacing = unit(1, "lines"),
+    plot.margin = margin(t = 18, r = 8, b = 8, l = 8)
+  )
+
+```
+
+## Scatter plot of Residuals
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+ggplot(timeseries_data_mods, aes(x = pred, y = resid)) +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  geom_point(alpha = 0.6, size = 1.6) +
+  stat_smooth(method = "loess", se = F, linewidth = 0.7, color = "blue") +
+  labs(
+    x = "Predicted",
+    y = "Residuals",
+  ) +
+  facet_wrap(~ model, ncol = 2, scales = "free_x") +
+  theme_minimal(base_size = 12) + theme(
+    plot.margin = margin(t = 18, r = 8, b = 8, l = 8)
+  )
+ 
+```
+
+## Stationary Time-Series plot
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+ggplot(timeseries_data_mods, aes(x = published_at)) +
+  geom_line(aes(y = actual, color = "Actual"), linewidth = 0.7) +
+  geom_line(aes(y = pred, color = model), linewidth = 0.5, alpha = 0.9) +
+  scale_color_manual(values = color_selection) +
+  facet_wrap(~ model, ncol = 2, scales = "free_x") +
+  labs(
+    x = "Published Date",
+    y = "log(like_view_ratio + 1)",
+    color = "Legend"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    plot.margin = margin(t = 18, r = 8, b = 8, l = 8)
+  )
+
+```
+
+## Non-Stationary Time Series
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+ggplot(timeseries_data_mods_smoothed, aes(x = published_at)) +
+  geom_line(aes(y = actual_smooth, color = "Actual"), linewidth = 0.7) +
+  geom_line(aes(y = pred_smooth, color = model), linewidth = 0.5, alpha = 0.9) +
+  scale_color_manual(values = color_selection) +
+  facet_wrap(~ model, ncol = 2, scales = "free_x") +
+  labs(
+    x = "Published Date", y = "log(like_view_ratio + 1)",
+    color = "Legend"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    plot.margin = margin(t = 18, r = 8, b = 8, l = 8)
+  )
+```
+
+```{r session-info, include=FALSE}
+
+sessionInfo()
+
+```
+
