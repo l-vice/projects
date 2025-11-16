@@ -24,7 +24,7 @@ Each project demonstrates applied statistical modeling, data analysis, and compu
 ### 3. Hidden Markov Models for Algorithmic Trading 
 **Repository:** [hmm_fx](https://github.com/l-vice/hmm_fx)  
 **Overview:** Implementation of Hidden Markov and Hidden Semi-Markov Models to identify latent regime shifts in EUR-based FX markets. Compared Normal and Student-t emissions under Poisson and Gamma sojourn structures.  
-**Report:** (Report link will be added after polishing and upload)
+**Report:** [View HTML Report] (https://l-vice.github.io/hmm_fx/report/fp_2_hmm.html)
 
 ---
 
