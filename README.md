@@ -44,4 +44,3 @@ This repository serves as a central hub for my analytical and machine learning p
 ---
 
 **Contact:** [lbojovic2@gmail.com](mailto:lbojovic2@gmail.com)  
-**GitHub Profile:** [https://github.com/l-vice](https://github.com/l-vice)
