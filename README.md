@@ -7,7 +7,7 @@ Each project demonstrates applied statistical modeling, data analysis, and compu
 
 ## Projects
 
-### 1. Regression Modeling – Hurdle and GAMLSS Frameworks
+### 1. Regression Modeling – Hurdle model using GAMLSS
 **Repository:** [regmod_hurdle](https://github.com/l-vice/regmod_hurdle)  
 **Overview:** Developed Hurdle and GAMLSS models to handle zero-inflated and heteroskedastic data. Implemented logit and log links to model customer purchasing behaviour. Evaluated model performance using diagnostic plots and distributional comparisons.  
 **Report:** [View HTML Report](https://l-vice.github.io/regmod_hurdle/09092025_hurdle_model_report_LBK.html)
